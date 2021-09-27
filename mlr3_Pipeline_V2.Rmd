@@ -33,12 +33,7 @@ library(mlr3pipelines)
 
 ##Use pre Analysed 
 ```{r}
-data.imputed <- data.imputed_insole
-data.mlr <- data.imputed
-
-data.mlr$PreFrailty
-
-data.mlr.reduced <- data.imputed_insole
+data.mlr.reduced <- data.insole
   data.imputed %>% select(-c(SPPB.Score, TUG_Test.Time,Time.for.4m,Time.for.5x.sit.to.stand, fall_risk))
 
 normalize <- function(x) {
