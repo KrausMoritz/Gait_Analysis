@@ -1,0 +1,1640 @@
+---
+title: "MLR3_FallRisk"
+output: 
+  html_notebook:
+    toc: yes
+    toc_float: true
+    toc_collapsed: true
+    code_folding: hide
+theme: lumen
+editor_options:
+  chunk_output_type: inline
+  fig_crop: false
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+##Load Packages
+```{r}
+library(ggplot2) 
+library(dplyr)
+library(Hmisc)
+library(reshape2)
+
+#macchine learning libraries
+library(mlr3)
+library(mlr3learners)
+library(mlr3tuning)
+library("mlr3verse")
+library(mlr3pipelines)
+```
+
+##Use pre Analysed 
+```{r}
+data.imputed <- data.imputed_insole
+data.mlr <- data.imputed
+
+data.mlr$PreFrailty
+
+data.mlr.reduced <- data.imputed_insole
+  data.imputed %>% select(-c(SPPB.Score, TUG_Test.Time,Time.for.4m,Time.for.5x.sit.to.stand, fall_risk))
+
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+neural.data2<- mutate_all(data.mlr.reduced, function(x) as.numeric(as.character(x)))
+normalized.data <- as.data.frame(lapply(neural.data2, normalize))
+normalized.data$PreFrailty <- as.factor(normalized.data$PreFrailty)
+
+data.exp.op = data.mlr %>% select('PreFrailty','Age',
+                           'Bone.mineral.density.femoral.neck',
+                           'C.reactive.protein',
+                           'Calcium.corr.',
+                           'Calf.circumference',
+                           'Dom_Hand',
+                           #'Stolpern',
+                           #'daily_leaving_appartment',
+                           #'past_falls',
+                           'Myoglobin',
+                           'Vitamin.D3',)
+task_ExOp <-TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.exp.op), "PreFrailty", positive = "1", extra_args = list())
+```
+
+```{r}
+set.seed(3)
+library(ranger)
+task <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.mlr.reduced), "PreFrailty", positive = "1", extra_args = list())
+task
+
+task.norm <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(normalized.data), "PreFrailty", positive = "1", extra_args = list())
+
+task_ExOp <- task$select(c('Age',
+                           'Bone.mineral.density.femoral.neck',
+                           'Calcium.corr.',
+                           'Calf.circumference',
+                           'Dom_Hand',
+                           #'Stolpern',
+                           #'daily_leaving_appartment',
+                           #'past_falls',
+                           'Myoglobin',
+                           'Vitamin.D3',
+                           'C.reactive.protein'))
+
+task_sarc = task$select("SARC_F.Score")
+task
+```
+
+##Plot Sarc-F only
+```{r}
+task = task_sarc
+learner = mlr_learners$get("classif.log_reg")
+print(learner)
+
+learner <- lrn("classif.log_reg", predict_type = "prob")
+
+train_set = sample(task$nrow, 0.7 * task$nrow)
+test_set = setdiff(seq_len(task$nrow), train_set)
+learner$train(task, row_ids = train_set)
+prediction = learner$predict(task, row_ids = test_set)
+prediction$score(msr("classif.auc"))
+
+resampling = rsmp("cv", folds = 3L)
+resampling$instantiate(task)
+rr = resample(task, learner, resampling)
+as.data.table(rr)[, list(resampling, iteration, prediction)]
+rr$aggregate((msr("classif.auc")))
+rr$aggregate(msr("classif.ce"))
+#View all predictions
+rr$prediction()
+autoplot(rr, type = "roc")
+ggplot2::autoplot(prediction, type = "roc")
+
+auc.lr.insole <- rr$aggregate((msr("classif.auc")))
+ce.lr.insole <- rr$aggregate(msr("classif.ce"))
+rr$predictions()
+learner$param_set
+#View all predictions
+rr$prediction()
+p.sarc_log <- autoplot(rr, type = "roc")+
+  ggtitle("ROC Logistic Regression (SARC-F)")+
+  scale_y_continuous(expand = c(0.0005, 0.0005)) + 
+  theme_bw()+
+  theme(legend.position = "none",
+        legend.text = element_blank(),
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )+
+  annotate("text", x = 0.7, y = 0.35, label = paste("Estimation of AUC:",round(auc.lr.insole,3)), fontface="bold",fontsize=30)+
+  annotate("text", x = 0.7, y = 0.30, label = paste("Classification Error:",round(ce.lr.insole,3)), fontface="bold", fontsize=30)+
+annotate("text", x = 0.7, y = 0.25, label = paste("Estimation of Gini:",round(2*auc.lr.insole-1,3)), fontface="bold",fontsize=30)
+#ggsave("Roc_Sarc_only.pdf", width = 5, height = 5)
+```
+##Encode Factors
+```{r}
+fencoder = po("encode", method = "treatment",
+  affect_columns = selector_type("factor"))
+fencoder = po("encode", method = "one-hot",
+  affect_columns = selector_type("factor"))
+
+fencoder$train(list(task_ExOp))
+task_ExOp
+```
+##Feature Selection
+###Random Search Log Reg
+```{r}
+set.seed(3)
+task = TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.mlr.reduced), target = "PreFrailty", positive = "1", extra_args = list())
+
+learner = lrn("classif.log_reg")
+resampling = rsmp("cv", folds = 3)
+measure = msr("classif.ce")
+
+resampling$instantiate(task)
+
+library(mlr3fselect)
+
+terminator = trm("run_time", secs = 20)
+FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator)
+mlr_fselectors
+terminator = trm("evals", n_evals = 10)
+#Random Search Feature Selector
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator)
+fselector = fs("random_search", batch_size = 1, max_features = 10)
+#fselector = fs("rfe",feature_fraction = 0.2, recursive = FALSE)
+#optimize#
+fselector$param_set$values
+fselector$optimize(instance)
+#overview of all evals
+as.data.table(instance$archive)
+#benchmark for comparison
+instance$archive$benchmark_result
+#best performing Result
+instance$result
+#extract relevant Features
+as.data.table(instance$archive)
+instance$result
+task$select(instance$result_feature_set)
+task_rls<- task
+task_rls$feature_names
+#task_rls$select(c("Age","C.reactive.protein", "EQ5_Index",
+  #                "Gamma.gluteryl.transferase","Leukocytes", "Myoglobin" , "Vitamin.D3","estimated_gz"))
+task_rls
+#fencoder$train(list(task_rls))
+task_rls
+```
+
+###Sequential Forward Feature Selection
+```{r}
+task <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.mlr.reduced), "PreFrailty", positive = "1", extra_args = list())
+terminator = trm("stagnation", iters = 15, threshold = 3)
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator)
+
+fselector = fs("sequential", max_features = 5)
+fselector$optimize(instance)
+fselector$param_set$values
+##Extract Features
+as.data.table(instance$archive)
+instance$result
+task$select(instance$result_feature_set)
+task_sfs<- task
+task_sfs
+#fencoder$train(list(task_sfs))
+
+```
+
+```{r}
+set.seed(3)
+task <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.mlr.reduced), "PreFrailty", positive = "1", extra_args = list())
+resampling = rsmp("cv", folds = 3)
+measure = msr("classif.ce")
+#using sequential 
+learner = lrn("classif.ranger", importance = "impurity_corrected")
+terminator = trm("none")
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator,
+  store_models = TRUE)
+fselector = fs("rfe",feature_fraction = 0.2, recursive = FALSE
+               )
+fselector$optimize(instance)
+# fselector$param_set$values$min_features = 5
+# fselector$param_set$values
+# $feature_number= 0.25
+##Extract Features
+as.data.table(instance$archive)
+instance$result
+task$select(instance$result_feature_set)
+task
+task_rfe_randomforest = task#$select(c('Age','C.reactive.protein', 'Dom_Hand', 'EQ5_Index', 'Leukocytes','Low_Hand', 'Myoglobin'))
+```
+
+###Recursive Backward Feature Selection
+```{r}
+#using sequential 
+task <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.mlr.reduced), "PreFrailty", positive = "1", extra_args = list())
+learner = lrn("classif.ranger", importance = "impurity")
+terminator = trm("none")
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator,
+  store_models = TRUE)
+
+fselector = fs("rfe", recursive = FALSE
+               )
+fselector$optimize(instance)
+# fselector$param_set$values$min_features = 5
+# fselector$param_set$values
+# $feature_number= 0.25
+##Extract Features
+as.data.table(instance$archive)
+instance$result
+task_rfe <- task$select(instance$result_feature_set)
+
+#task_rfe <- task_ExOp
+
+#fencoder = po("encode", method = "one-hot",
+#   affect_columns = selector_type("factor"))
+# 
+# task_rfe<- fencoder$train(list(task_rfe))
+# task_rfe
+```
+###Auto FS
+```{r}
+learner = lrn("classif.rpart")
+terminator = trm("evals", n_evals = 10)
+fselector = fs("genetic_search")
+
+at = AutoFSelector$new(
+  learner = learner,
+  resampling = rsmp("holdout"),
+  measure = msr("classif.ce"),
+  terminator = terminator,
+  fselector = fselector
+)
+at
+```
+
+###Boxplot_Comparison of Feature Selections
+```{r}
+#install.packages("genalg")
+grid = benchmark_grid(
+  task = list(task_rfe_randomforest,task_rls, task_ExOp),
+  learner = list(lrn("classif.ranger",predict_type = "prob")),
+  resampling = rsmp("cv", folds = 3)
+)
+# avoid console output from mlrfselect
+logger = lgr::get_logger("bbotk")
+logger$set_threshold("warn")
+
+bmr = benchmark(grid, store_models = TRUE)
+bmr$aggregate(msrs(c("classif.fbeta", "classif.ce", "classif.auc")))
+#bmr_featureS <- as.data.frame(as.data.table(bmr$aggregate(msrs(c("classif.fbeta", "classif.ce", "classif.auc")))))
+
+#write.csv(bmr_featureS,"FeatureSelectionBMR.csv")
+feature_box <- autoplot(bmr,"boxplot", fill = c("#1B9E77", "#D95F02", "#7570B3"))
+
+feature_box+
+    ggtitle("Comparison of Feature Selection Strategies for Prediction of Patients Physical Frailty")+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.4)) +
+  #scale_x_discrete(breaks=c("classif.rpart"),
+                      #labels=c("Control", "Treat 1", "Treat 2"))+
+  #scale_x_discrete(labls = c("Random Forest Impoortance", "Logistic Random Feature Selection", "Expert Opinion Selection"))+
+  #                    labels = c("Recursive FS","Random Logistic FS","Sequential Forward FS","Experts Selection"))+
+  ylab("Classification Error")+
+  theme_bw()+
+  theme(legend.position= "none", 
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 11, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank())
+
+#ggsave("feature_selection_Comparison_V3.pdf")
+```
+
+###Nested Resampling
+```{r}
+task <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.mlr.reduced), "PreFrailty", positive = "1", extra_args = list())
+resampling_inner = rsmp("cv", folds = 5)
+measure = msr("classif.ce")
+
+at = AutoFSelector$new(
+  learner = learner, 
+  resampling = resampling_inner, 
+  measure = measure,
+  terminator = terminator,
+  fselector = fs("genetic_search"),
+  store_models = TRUE)
+
+resampling_outer = rsmp("cv", folds = 3)
+
+rr = resample(task, at, resampling_outer, store_models = TRUE)
+rr$aggregate()
+do.call(rbind, lapply(rr$learners, function(x) x$fselect_result))
+rr$score()
+rr$learners[[1]]$archive$data
+
+as.data.table(rr)
+#gives best instance
+as.data.table(rr)$learner[[3]]$fselect_result
+as.data.table(rr)$learner[[3]]$result_feature_set
+##Extract Features
+as.data.table(instance$archive)
+rr$results
+task$select(rr$learner[[1]]$result_feature_set)
+task
+task_nrs <- task
+task_nrs
+
+autoplot(rr)
+```
+
+
+##Encode Factors
+```{r}
+fencoder = po("encode", method = "treatment",
+  affect_columns = selector_type("factor"))
+fencoder = po("encode", method = "one-hot",
+  affect_columns = selector_type("factor"))
+
+task2 <- fencoder$train(list(task))
+task2
+```
+
+##Compare Learners
+```{r}
+set.seed(123)
+learners = lrns(c("classif.rpart", "classif.ranger", "classif.kknn","classif.nnet", "classif.svm","classif.xgboost","classif.log_reg"))
+tasks = list(task_rls,task_rfe)
+resampling = rsmp("cv", folds = 3L)
+design = benchmark_grid(tasks, learners,resampling)
+bmr = benchmark(design)
+
+bmr$aggregate()[, list(nr, resample_result, task_id, learner_id, classif.ce)]            
+```
+
+
+###Plot of Benchmarks
+```{r}
+my.box<- mlr3viz::autoplot(bmr, "boxplot", fill = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D","#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D"))
+my.box+
+  ggtitle("Comparison of Learners for Prediction of Patients under Fall Risk")+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 0.4)) + 
+  ylab("Classification Error")+
+  theme_bw()+
+  theme(legend.position= "none", 
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )
+#ggsave("Comparison_classification_error_rfe_V3.pdf", width = 7, height = 5)
+```
+
+```{r}
+measures = list(
+  msr("classif.auc", id = "auc_test", predict_sets = "test")
+)
+tab = bmr$aggregate(measures)
+print(tab)
+ranks = tab[, .(learner_id, rank_test = rank(-auc_test), auc_test), by = task_id]
+ranks = ranks[, .( mrank_test = mean(rank_test), auc_test), by = learner_id]
+print(ranks)
+ranks[order(mrank_test)]
+```
+
+
+```{r}
+library(pROC)
+set.seed(123)
+learners = lrns(c("classif.rpart", "classif.ranger", "classif.kknn","classif.nnet", "classif.svm","classif.xgboost", "classif.log_reg"
+                  
+                  ),predict_type = "prob")
+
+tasks = task_ExOp
+resampling = rsmp("cv", folds = 10)
+design = benchmark_grid(tasks, learners,resampling)
+bmr = benchmark(design)
+bmr             
+
+bmr$aggregate()[, list(nr, resample_result, task_id, learner_id, classif.ce)]           
+my.roc <- mlr3viz::autoplot(bmr, type = "roc",colour = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D"), size = 4)
+my.roc+
+  ggtitle("ROC of Learners")+
+  scale_y_continuous(expand = c(0, 0)) + 
+  theme_bw()+
+  theme(
+        legend.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        legend.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )
+
+#ggsave("ROC_Comparison_Models_V2.pdf")
+```
+##Nice ROCs
+```{r}
+library(precrec)
+library(mlr3viz)
+roc_data <- evalmod(as_precrec(bmr), mode = "rocprc", calc_avg = TRUE)  %>% # setting calc_avg to FALSE is critical
+  fortify() %>% # precrec objects have a fortify generic function
+  .[.$curvetype == "ROC", ] # both roc and prc are returned
+
+# Tracer les courbes
+ggplot(
+  data = roc_data,
+  mapping = aes(x = x, y = y, color = modname)
+) +
+  geom_abline(linetype="dashed", color="darkgrey", size=1)+
+  geom_line(size = 1.2)+
+   ggtitle("ROCs of Learners for Prediction of Patients Physical Frailty")+
+    ylab("Sensitivity")+
+  xlab("1-Specificity")+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) + 
+  scale_x_continuous(expand = c(0.005, 0), limits = c(0, 1)) + 
+  scale_color_manual(values = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D"))+
+  theme_bw()+
+  theme(legend.position= "bottom", 
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.9),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )
+
+ggsave("ROC_Comparison_Learners_Labs.pdf", width = 7, height = 7)
+```
+
+##nice PRC
+```{r}
+#library(precrec)
+roc_data <- evalmod(as_precrec(bmr), mode = "rocprc", calc_avg = TRUE)  %>% # setting calc_avg to FALSE is critical
+  fortify() %>% # precrec objects have a fortify generic function
+  .[.$curvetype == "PRC", ] # both roc and prc are returned
+
+# Tracer les courbes
+ggplot(
+  data = roc_data,
+  mapping = aes(x = x, y = y, color = modname)
+) +
+  geom_line(size = 1.2)+
+   ggtitle("PRCs of Learners for Prediction of Patients under Fall Risk")+
+    ylab("Sensitivity")+
+  xlab("1-Specificity")+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) + 
+  scale_color_manual(values = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D"))+
+  theme_bw()+
+  theme(legend.position= "bottom", 
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.9),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )
+
+#ggsave("ROC_Comparison_Learners.pdf")
+```
+
+```{r}
+my.prc<- mlr3viz::autoplot(bmr, type = "prc")
+my.prc+
+  ggtitle("PRC of Learners")+
+  scale_y_continuous(expand = c(0, 0)) + 
+  theme_bw()+
+  theme(
+        legend.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        legend.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )
+
+#ggsave("PRC_learners.pdf")
+```
+
+
+
+###RocCurve of Models
+```{r}
+library("mlr3viz")
+ggplot2::autoplot(prediction, type = "roc")
+ggplot2::autoplot(bmr, type = "ce")
+```
+## Stacking Learners!
+```{r}
+stackgraph = po("imputeoor") %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.ranger", predict_type = "prob")),
+    po("learner_cv", lrn("classif.kknn", predict_type = "prob")))) %>>%
+  po("featureunion") %>>% lrn("classif.ranger")
+
+stackgraph
+
+stackgraph$train(task)
+summary(stackgraph$pipeops$classif.log_reg$state$model)
+stackgraph$plot()
+```
+##Feature Selection for RF
+```{r}
+filter = flt("mim")
+filter$calculate(task,nfeat = 10)$scores
+
+fpipe = po("imputeoor") %>>% po("filter", flt("mim"), filter.nfeat = 3)
+fpipe$train(task)[[1]]$head()
+
+
+learner = lrn("classif.ranger")
+resampling = rsmp("cv", folds = 3)
+measure = msr("classif.ce")
+resampling$instantiate(task)
+#Classes
+terminator = trm("run_time", secs = 10)
+FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator)
+#Random Search Selection
+xterminator = trm("evals", n_evals = 10)
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator)
+fselector = fs("random_search", batch_size = 5)
+fselector$optimize(instance)
+#Best Performing Feature Selection Random Search
+instance$result
+```
+###Sequentia Forward FS
+```{r}
+terminator = trm("stagnation", iters = 5)
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator)
+
+fselector = fs("sequential")
+fselector$optimize(instance)
+fselector$optimization_path(instance)
+```
+
+###Recursive Feature elimination
+```{r}
+learner = lrn("classif.ranger", importance = "impurity")
+terminator = trm("none")
+instance = FSelectInstanceSingleCrit$new(
+  task = task, 
+  learner = learner, 
+  resampling = resampling, 
+  measure = measure, 
+  terminator = terminator,
+  store_models = TRUE)
+
+fselector = fs("rfe", recursive = FALSE)
+fselector$optimize(instance)
+#View Resulst
+as.data.table(instance$archive)[, 1:8]
+```
+
+```{r}
+
+set.seed(20191101)
+cv10_instance = rsmp("cv")$instantiate(task)
+cv3_instance = rsmp("cv", folds = 3)$instantiate(task)
+
+inst = TuningInstanceSingleCrit$new(
+  task,
+  learner = fpipe %>>% lrn("classif.ranger"),
+  resampling = cv10_instance,
+  measure = msr("classif.ce"),
+  terminator = trm("none"),
+  search_space = c(1,40)
+)
+tuner = tnr("grid_search")
+```
+##feature selection
+```{r}
+library(mlr3fselect)
+instance = FSelectInstanceSingleCrit$new(
+task, learner, resampling, measure,
+terminator)
+```
+#optimized kNN, GridSearch
+```{r}
+task = task_ExOp
+set.seed(8008135)
+cv10_instance = rsmp("cv", folds = 10)
+
+# fix the train-test splits using the $instantiate() method
+cv10_instance$instantiate(task)
+
+# have a look at the test set instances per fold
+cv10_instance$instance
+
+knn = lrn("classif.kknn", predict_type = "prob")
+knn$param_set$values$kernel = "rectangular"
+knn$param_set
+library("paradox")
+search_space = ParamSet$new(list(
+  ParamInt$new("k", lower = 3, upper = 20),
+  ParamInt$new("distance", lower = 1, upper = 2)
+))
+
+instance_grid = TuningInstanceSingleCrit$new(
+  task = task,
+  learner = knn,
+  resampling = cv10_instance,
+  measure = msr("classif.ce"),
+  terminator = trm("none"),
+  search_space = search_space
+)
+
+set.seed(1)
+tuner_grid = tnr("grid_search", resolution = 18, batch_size = 36)
+tuner_grid$optimize(instance_grid)
+instance_grid$result
+as.data.table(instance_grid$archive)
+ggplot(as.data.table(instance_grid$archive), aes(x = k, y = classif.ce, color = as.factor(distance))) +
+  geom_line() + geom_point(size = 3)
+
+```
+##Random Search kNN
+```{r}
+large_searchspace = ParamSet$new(list(
+  ParamDbl$new("k", lower = log(3), upper = log(50)),
+  ParamDbl$new("distance", lower = 1, upper = 3),
+  ParamFct$new("kernel", c("rectangular", "gaussian", "rank", "optimal")),
+  ParamLgl$new("scale")
+))
+
+large_searchspace$trafo = function(x, param_set) {
+  x$k = round(exp(x$k))
+  x
+}
+tuner_random = tnr("random_search", batch_size = 36)
+
+instance_random = TuningInstanceSingleCrit$new(
+  task = task,
+  learner = knn,
+  resampling = cv10_instance,
+  measure = msr("classif.ce"),
+  terminator = trm("evals", n_evals = 36),
+  search_space = large_searchspace,
+)
+tuner_random$optimize(instance_random)
+as.data.table(instance_random$archive)
+ggplot(as.data.table(instance_random$archive),
+  aes(x = x_domain_k, y = classif.ce, color = x_domain_scale)) +
+  geom_point(size = 3) + geom_line()
+```
+```{r}
+ggplot(as.data.table(instance_random$archive),
+  aes(x = x_domain_k, y = classif.ce, color = x_domain_kernel)) +
+  geom_point(size = 3) + geom_line()
+```
+##Compare Random and Grid Search
+```{r}
+instance_random$result_y
+instance_grid$result_y
+```
+##Autotuner
+```{r}
+grid_auto = AutoTuner$new(
+  learner = knn,
+  resampling = rsmp("cv", folds = 5), # we can NOT use fixed resampling here
+  measure = msr("classif.ce"),
+  terminator = trm("none"),
+  tuner = tnr("grid_search", resolution = 18),
+  search_space = search_space
+)
+
+rr = resample(task, grid_auto, cv10_instance, store_models = TRUE)
+
+rr$aggregate()
+rr$learners[[1]]$tuning_result
+```
+
+
+##optimzation of Random Forest
+```{r}
+set.seed(8008135)
+cv10_instance = rsmp("cv", folds = 10)
+
+# fix the train-test splits using the $instantiate() method
+cv10_instance$instantiate(task)
+
+# have a look at the test set instances per fold
+cv10_instance$instance
+
+ranger = lrn("classif.ranger", predict_type = "prob")
+print(ranger$param_set)
+ranger$param_set$values$num.trees = to_tune(10, 500)
+ranger$param_set$values$mtry = to_tune(2, 40)
+
+resampling = rsmp("cv", folds = 3)
+measure = msr("classif.ce")
+terminator = trm("none")
+
+instance = TuningInstanceSingleCrit$new(
+  task = task,
+  learner = ranger,
+  resampling = resampling,
+  measure = measure,
+  terminator = terminator
+)
+
+print(instance)
+tuner = tnr("grid_search", resolution = 5)
+
+print(tuner)
+generate_design_grid(ranger$param_set$search_space(), resolution = 5)
+#Surface Plot of Search Task
+autoplot(instance, type = "surface", cols_x = c("mtry", "num.trees"))+
+  ggtitle("Grid Search of Random Forest Optimization")
+#ggsave("Grid_Search_Tuning_RF.pdf")
+
+#final model
+learner = ranger
+learner$param_set$values = instance$result_learner_param_vals
+learner$train(task)
+#results of final model
+instance$result_y
+learner$train(task, row_ids = train_set)
+
+```
+##Optimization of SVM
+
+##Optimization of XGBoost
+
+##Optimization of NeuarlNet
+
+##Predict Grid
+```{r}
+set.seed(1)
+learner <- lrn("classif.kknn", predict_type = "prob")
+
+train_set = sample(task$nrow, 0.7 * task$nrow)
+test_set = setdiff(seq_len(task$nrow), train_set)
+learner$train(task, row_ids = train_set)
+prediction2 = learner$predict(task, row_ids = test_set )
+prediction2$score(msr("classif.auc"))
+
+ggplot2::autoplot(prediction2, type = "roc")
+```
+
+##Set up Graph Learner Pipeline
+```{r}
+# missinf Values NUMERIC
+imp_missind = po("missind")
+imp_num = po("imputehist", param_vals = list(affect_columns = selector_type("numeric")))
+# Dealing with missing factors
+imp_missind = po("missind", param_vals = list(affect_columns = NULL, which = "all"))
+imp_fct = po("imputeoor",
+  param_vals = list(affect_columns = selector_type("factor")))
+graph = po("copy", 2) %>>%
+  gunion(list(imp_missind, imp_num %>>% imp_fct)) %>>%
+  po("featureunion")
+plot(graph)
+
+pca        = po("pca")
+#pca        = po("none")
+filter     = po("filter", filter = mlr3filters::flt("anova"), filter.frac = 0.5)
+learner_po = po("learner", learner = lrn("classif.rpart"))
+
+p1 = ppl("branch", list("pca" = po("pca"), "nothing" = po("nop")))
+
+p2 = flt("anova")
+
+p3 = ppl("branch", list(
+  "svm" = lrn("classif.svm", id = "svm", kernel = "radial", type = "C-classification"),
+  "rf" = lrn("classif.ranger", id = "rf"),
+  "kknn" = lrn("classif.kknn", id = "kknn", scale = TRUE)
+  ))
+
+scale = mlr_pipeops$get("scale")
+fencoder = po("encode", method = "one-hot",
+  affect_columns = selector_type("factor"))
+
+learners = list(
+  kknn = lrn("classif.kknn", id = "kknn"),
+  svm = lrn("classif.svm", id = "svm", type = "C-classification"),
+  rf = lrn("classif.ranger", id = "rf")
+)
+#learners$param_set$values$kernel = "rectangular"
+#bagging
+bagging = PipeOpClassifAvg$new()
+
+graph = fencoder %>>% mlr_pipeops$get("scale") %>>% filter %>>%ppl("branch", lapply(learners, po))
+
+gr2 = fencoder %>>% mlr_pipeops$get("scale")  %>>% p3
+
+gr =  fencoder %>>% mlr_pipeops$get("scale")  %>>% 
+  learners %>>% bagging
+#gr = filter %>>% p3
+glrn = GraphLearner$new(gr,predict_type = "prob")
+#glrn2 = GraphLearner$new(gr2,predict_type = "prob")
+plot(gr)
+
+glrn$graph$pipeops$scale
+task_rls <- task_ExOp
+train.idx = sample(seq_len(task_rls$nrow), 70)
+test.idx = setdiff(seq_len(task_rls$nrow), train.idx)
+task_rls <- task_ExOp
+glrn$train(task_rls, train.idx)
+glrn$model
+glrn$predict(task_rls)
+rr = resample(task_rls, glrn, rsmp("cv", folds = 3L))
+rr$predictions()
+prediction3 = glrn$predict(task_rls, test.idx)
+prediction3$score(msr("classif.auc"))
+
+
+ggplot2::autoplot(rr$prediction(), type = "roc")
+
+plot(graph)
+autoplot(task_rls, type = "pairs")
+
+#ggsave("Pairs_task_rls_overview.pdf", width = 40,height = 40, limitsize = FALSE)
+```
+##Tuneing Pipeline
+###Pipeoperaters
+####Task for Pipelines
+```{r}
+task_pipe = 
+```
+
+```{r}
+graph_learner = GraphLearner$new(gr2)
+print(gr$param_set)
+graph_learner <- glrn
+
+
+# branch
+graph_learner$param_set$values$branch.selection = to_tune(c("svm", "rf", "kknn"))
+
+# kknn
+graph_learner$param_set$values$kknn.k = to_tune(p_int(3, 50, logscale = TRUE, depends = branch.selection == "kknn"))
+
+# svm
+graph_learner$param_set$values$svm.cost = to_tune(p_dbl(-1, 1, trafo = function(x) 10^x, depends = branch.selection == "svm"))
+
+# ranger
+graph_learner$param_set$values$rf.mtry = to_tune(p_int(1, 8, depends = branch.selection == "rf"))
+
+# short learner id for printing
+graph_learner$id = "graph_learner"
+#graph_learner$param_set$values$kknn.scale = TRUE
+
+instance = tune(
+  method = "random_search", 
+  task = task_rls, 
+  learner = graph_learner, 
+  resampling = rsmp("cv", folds = 3), 
+  measure = msr("classif.ce"),
+  term_evals = 20)
+#final model
+learner = GraphLearner$new(graph, predict_type = "prob")
+learner$param_set$values = instance$result_learner_param_vals
+
+learner$train(task_rls,train.idx)
+
+learner$model
+learner$predict(task_rls)
+
+rr = resample(task_rfe, learner, rsmp("cv"))
+
+prediction4 = learner$predict(task_rfe, test.idx)
+prediction4$score(msr("classif.auc"))
+prediction4
+
+ggplot2::autoplot(prediction4, type = "roc")
+rr$score()
+rr$aggregate(msr("classif.auc"))
+prediction <- rr$prediction()
+autoplot(rr, type = "roc")
+ggplot2::autoplot(prediction, type = "roc")
+task_rls
+
+```
+
+```{r}
+task.all <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk.all", as_data_backend(data_with_factors %>% select()), "fall_risk", positive = "1", extra_args = list())
+task.all
+```
+
+##Nested Resampling for unbiased prediction
+```{r}
+graph_learner = GraphLearner$new(gr2, predict_type  = "prob")
+graph_learner$param_set$values$branch.selection = to_tune(c("kknn", "svm", "rf"))
+graph_learner$param_set$values$kknn.k = to_tune(p_int(3, 50, logscale = TRUE, depends = branch.selection == "kknn"))
+graph_learner$param_set$values$svm.cost = to_tune(p_dbl(-1, 1, trafo = function(x) 10^x, depends = branch.selection == "svm"))
+graph_learner$param_set$values$rf.mtry = to_tune(p_int(1, 8, depends = branch.selection == "rf"))
+graph_learner$id = "graph_learner"
+
+inner_resampling = rsmp("cv", folds = 3)
+at = AutoTuner$new(
+  learner = graph_learner,
+  resampling = inner_resampling,
+  measure = msr("classif.ce"),
+  terminator = trm("evals", n_evals = 10),
+  tuner = tnr("random_search"),
+  store_models = TRUE
+  )
+
+outer_resampling = rsmp("cv", folds = 3)
+rr = resample(task_rls, at, outer_resampling, store_models = TRUE)
+
+rr$score()
+rr$aggregate(msr("classif.auc"))
+# graph_learner$train(task_ExOp, train.idx)
+# prediction110 <- graph_learner$predict(task_ExOp, test.idx)
+# prediction110$confusion
+
+prediction <- rr$prediction("test")
+auc.pipe<- prediction$score(msr("classif.auc"))
+ce.pipe<- prediction$score(msr("classif.ce"))
+ce.pipe
+my.roc.pipe <- autoplot(rr, type = "roc")
+ggplot2::autoplot(prediction, type = "roc")
+
+my.roc.pipe+
+ggtitle("ROC Curve Optimized Learner")+
+  scale_y_continuous(expand = c(0, 0)) + 
+  theme_bw()+
+  theme(legend.position = "none",
+        legend.text = element_blank(),
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )+
+  annotate("text", x = 0.7, y = 0.25, label = paste("Pessimistic Estimation of AUC:",round(auc.pipe, 3)))+
+  annotate("text", x = 0.6, y = 0.175, label = paste("Classification Error:",round(ce.pipe, 3)))
+
+#ggsave("ROC_PIPE_optimized_V2.pdf")
+```
+```{r}
+#short version
+graph_learner = GraphLearner$new(gr)
+graph_learner$param_set$values$lrn_branch.selection = to_tune(c("kknn", "svm", "rf"))
+graph_learner$param_set$values$kknn.k = to_tune(p_int(3, 50, logscale = TRUE, depends = branch.selection == "kknn"))
+graph_learner$param_set$values$svm.cost = to_tune(p_dbl(-1, 1, trafo = function(x) 10^x, depends = branch.selection == "svm"))
+graph_learner$param_set$values$rf.mtry = to_tune(p_int(1, 8, depends = branch.selection == "rf"))
+graph_learner$id = "graph_learner"
+
+rr = tune_nested(
+  method = "random_search",
+  task = task_rls,
+  learner = graph_learner, 
+  inner_resampling = rsmp ("cv", folds = 3),
+  outer_resampling = rsmp("cv", folds = 3), 
+  measure = msr("classif.ce"),
+  term_evals = 10
+)
+
+```
+
+
+
+
+<!-- ##Autot Tuner of Pipeline -->
+<!-- ```{r} -->
+<!-- grid_auto = AutoTuner$new( -->
+<!--   learner = glrn, -->
+<!--   resampling = rsmp("cv"), # we can NOT use fixed resampling here -->
+<!--   measure = msr("classif.ce"), -->
+<!--   terminator = trm("none"), -->
+<!--   tuner = tnr("grid_search", resolution = 18), -->
+<!--   search_space = search_space -->
+<!-- ) -->
+
+<!-- rr = resample(task_rls, grid_auto, cv10_instance, store_models = TRUE) -->
+
+<!-- rr$aggregate() -->
+<!-- rr$learners[[1]]$tuning_result -->
+<!-- ``` -->
+##Pipwlinw KNN
+```{r}
+po("featureunion")
+train = engineer_features(train)
+
+```
+#Compare Pipelines
+```{r}
+set.seed(123)
+tasks = list(task_rls,task_rfe)
+resampling = rsmp("cv", folds = 3L)
+learners = list(glrn, glrn2)
+design = benchmark_grid(tasks, glrn, resampling)
+bmr = benchmark(design)
+
+bmr$aggregate()[, list(nr, resample_result, task_id, learner_id, classif.ce)]   
+```
+
+##New Pipeline
+```{r}
+task = task_ExOp
+credit_full = task$data()
+credit = credit_full[, sapply(credit_full, FUN = is.factor), with = FALSE]
+credit 
+set.seed(20191101)
+# sample values to NA
+credit = credit[, lapply(.SD, function(x) {
+  x[sample(c(TRUE, NA), length(x), replace = TRUE, prob = c(.9, .1))]
+})]
+credit$credit_risk = credit_full$credit_risk
+task = TaskClassif$new("FallRisk", data.mlr.reduced, "fall_risk")
+
+set.seed(20191101)
+cv10_instance = rsmp("cv")$instantiate(task)
+# future::plan("multiprocess") # uncomment for parallelization
+ranger = lrn("classif.ranger")
+ranger$train(task)
+mlr_pipeops$keys("^impute")
+
+imputer = po("imputeoor")
+task_imputed = imputer$train(list(task))[[1]]
+task_imputed$missings()
+head(task_imputed$data())
+
+imp_ranger = GraphLearner$new(po("imputeoor") %>>% ranger)
+
+imp_ranger$train(task)
+
+rr = resample(task, learner = imp_ranger, resampling = cv10_instance)
+rr$aggregate()
+
+filter = flt("mim")
+filter$calculate(task_imputed)$scores
+filter$param_set
+
+set.seed(8)
+fpipe = po("imputeoor") %>>% po("filter", flt("mim"), filter.nfeat = 6)
+fpipe$train(task)[[1]]$head()
+
+searchspace = ParamSet$new(list(
+  ParamInt$new("mim.filter.nfeat", lower = 1, upper = length(task$feature_names))
+))
+
+inst = TuningInstanceSingleCrit$new(
+  task,
+  learner = fpipe %>>% lrn("classif.ranger"),
+  resampling = cv10_instance,
+  measure = msr("classif.ce"),
+  terminator = trm("none"),
+  search_space = searchspace
+)
+tuner = tnr("grid_search")
+
+tuner$optimize(inst)
+arx = as.data.table(inst$archive)
+ggplot(arx, aes(x = mim.filter.nfeat, y = classif.ce)) + geom_line()
+```
+
+```{r}
+stackgraph = po("imputeoor") %>>%
+  gunion(list(
+    po("learner_cv", lrn("classif.ranger", predict_type = "prob")),
+    po("learner_cv", lrn("classif.kknn", predict_type = "prob")))) %>>%
+  po("featureunion") %>>% lrn("classif.log_reg", predict_type = "prob")
+library(data.table)
+ bmr = benchmark(data.table(
+  task = list(task_ExOp),
+  learner = list(
+    stackgraph,
+    GraphLearner$new(po("imputeoor") %>>% lrn("classif.ranger", predict_type = "prob", mtry = 6, max.depth = 6)),
+    GraphLearner$new(po("imputeoor") %>>% lrn("classif.kknn", predict_type = "prob", k = 10, scale = TRUE))),
+    #GraphLearner$new(po("imputeoor") %>>% lrn("classif.log_reg", predict_type = "prob"))),
+  resampling = list(cv10_instance)))
+bmr$aggregate()[, c("learner_id", "classif.tpr")]
+bmr$aggregate(msr("classif.auc"))
+
+plot(bmr)
+
+```
+```{r}
+stackgraph$train(task)
+summary(stackgraph$pipeops$classif.log_reg$state$model)
+autoplot(bmr, type = "roc")
+```
+
+```{r}
+# library(precrec)
+# library(mlr3viz)
+roc_data <- evalmod(as_precrec(bmr), mode = "rocprc", calc_avg = TRUE)  %>% # setting calc_avg to FALSE is critical
+  fortify() %>% # precrec objects have a fortify generic function
+  .[.$curvetype == "ROC", ] # both roc and prc are returned
+
+# Tracer les courbes
+ggplot(
+  data = roc_data,
+  mapping = aes(x = x, y = y, color = modname)
+) +
+  geom_abline(linetype="dashed", color="darkgrey", size=1)+
+  geom_line(size = 1.2, alpha = 0.8)+
+   ggtitle("ROCs of Learners for Prediction of Patients under Fall Risk\nPipeline 2")+
+    ylab("Sensitivity")+
+  xlab("1-Specificity")+
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) + 
+  scale_x_continuous(expand = c(0.005, 0), limits = c(0, 1)) + 
+  scale_color_manual(values = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D"))+
+  theme_bw()+
+  theme(legend.position= "right", 
+        legend.title = element_text(face = "bold", color = "black", size = 10),
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.9),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )
+
+ggsave("ROC_Comparison_Learners_pipe2.pdf", width = 8, height = 4)
+```
+##Optimization of Classification Machine
+```{r}
+stackgraphlearner <- GraphLearner$new(stackgraph)
+stackgraphlearner$param_set
+#stackgraphlearner$param_set$values$classif.ranger.mtry = to_tune(p_int(1, 8))
+stackgraphlearner$param_set$values$classif.ranger.mtry = 6
+stackgraphlearner$param_set$values$classif.kknn.k = 10#to_tune(p_int(3, 25))
+stackgraphlearner$param_set$values$classif.ranger.max.depth = 6#to_tune(p_int(1, 6))
+stackgraphlearner$param_set$values$classif.kknn.scale = TRUE
+
+inner_resampling = rsmp("cv", folds = 3)
+at = AutoTuner$new(
+  learner = stackgraphlearner,
+  resampling = inner_resampling,
+  measure = msr("classif.ce"),
+  terminator = trm("evals", n_evals = 10),
+  tuner = tnr("random_search"),
+  store_models = TRUE
+  )
+
+outer_resampling = rsmp("cv", folds = 3)
+rr = resample(task, at, outer_resampling, store_models = TRUE)
+
+rr$aggregate(msr("classif.auc"))
+rr$score()
+```
+
+<!-- ##robustified LogReg -->
+<!-- ```{r} -->
+<!-- task_unseen = task$clone()$filter(1:30) -->
+<!-- logreg = lrn("classif.log_reg") -->
+<!-- logreg$train(task_unseen) -->
+<!-- logreg$predict(task) -->
+<!-- task_constant = task$clone()$filter(1:2) -->
+<!-- logreg = lrn("classif.log_reg") -->
+<!-- logreg$train(task) -->
+<!-- robustify = po("fixfactors") %>>% -->
+<!--   po("removeconstants") %>>% -->
+<!--   po("imputesample", affect_columns = selector_type(c("ordered", "factor"))) -->
+
+<!-- robustify$plot() -->
+<!-- roblogreg = GraphLearner$new(robustify %>>% logreg) -->
+
+<!-- roblogreg$train(task, train.idx) -->
+<!-- roblogreg$predict(task, test.idx) -->
+<!-- ``` -->
+#Test Confusion Matrix
+##Confusion Matrix SarcF and RF (Labs)
+```{r}
+library(caret)
+
+#data.mlr.reduced2$SARC.Risk <- as.factor(data.mlr3$SARC.Risk)
+
+pred <- data.mlr.reduced2$SARC.Risk
+truth <- data.mlr.reduced2$PreFrailty
+sarc.complete<- confusionMatrix(pred, truth, positive ="1")
+
+data.mlr.reduced2[test_set,]
+#Prediction SARC-F-Testing Data
+pred <- data.mlr.reduced2[test_set,]$SARC.Risk
+truth <- data.mlr.reduced2[test_set,]$PreFrailty
+sarc.testset<- confusionMatrix(pred, truth, positive ="1")
+
+#Prediction RF Testing Data!
+pred <- test_table[test_set]$response
+truth <- data.mlr.reduced2[test_set,]$PreFrailty
+rf.testset<- confusionMatrix(pred, truth, positive ="1")
+
+sarc.testset
+rf.testset
+
+pred <- test_table$response
+truth <- data.mlr.reduced2$PreFrailty
+rf.complete <- confusionMatrix(pred, truth, positive ="1")
+```
+##Confusion Matrix TUG-Test
+```{r}
+data.mlr3 <- data.imputed.insole2%>% mutate(highTug = ifelse(tug_time > 12,1,0))
+data.mlr3$highTug <- as.factor(data.mlr3$highTug)
+data.mlr3$PreFrailty <- as.factor(data.mlr3$PreFrailty)
+pred <- data.mlr3$highTug
+truth <- data.mlr3$PreFrailty
+cm_tug <- confusionMatrix(pred, truth)
+cm_tug
+```
+```{r}
+# precision = TP / (TP + FP)
+# recall = TP / (TP + FN)
+precision <- (18/19)#posPredValue(predictions = , y, positive="1")
+recall <- (18/30)#sensitivity(predictions, y, positive="1")
+
+F1 <- (2 * precision * recall) / (precision + recall)
+```
+
+
+##Confusion Sohlen KNN
+```{r}
+pre <- rr$prediction()$response
+pred <- predrf = learner$train(task)$predict(task)
+data.mlr3$PreFrailty <- as.factor(data.mlr3$PreFrailty)
+truth <- data.mlr3$PreFrailty
+cm_sohlen <- confusionMatrix(pred, truth)
+cm_sohlen
+```
+##Confusion Sohlen RF
+```{r}
+pre <- rr$prediction()$response
+pred <- predrf$response[38:53]
+truth <- data.mlr3$PreFrailty[38:53]
+cm_sohlen_rf <- confusionMatrix(pred, truth)
+cm_sohlen_rf
+```
+
+
+##PlotGrid Classifier-Comparison Sarc
+```{r}
+title <- ggdraw() + 
+  draw_label(
+    "Comparison of frailty status (< 9) SARC-F vs. 8 non-mobility datapoints",
+    fontface = 'bold',
+    x = 0.1,
+    hjust = 0,
+    size = 12
+  )
+plot_grid(title, NULL,p.sarc_log,rf.plot2, nrow = 2, ncol = 2, rel_heights = c(0.051, 1))
+
+ggsave("Grid_Classifier_SARC_LABS.pdf", width = 8, height = 5)
+```
+
+
+
+```{r}
+#data.mlr.reduced2 <-  data.mlr.reduced %>% mutate(SARC.Risk = ifelse(SARC_F.Score < 9,1,0))
+data.mlr.reduced2 <-  data.mlr.reduced %>% mutate(SARC.Risk = ifelse(sarc_f_calculated_score == 0,0,1))
+
+data.mlr.reduced2$SARC.Risk <- as.factor(data.mlr.reduced2$SARC.Risk)
+data.mlr$fall_risk <- as.factor(data.mlr$fall_risk)
+pred <- data.mlr.reduced2$SARC.Risk#[41:57]
+truth <- data.mlr$fall_risk#[41:57]
+cm_sohlen_rf <- confusionMatrix(pred, truth)
+cm_sohlen_rf
+```
+
+```{r}
+pred <- rrk$prediction()$response#[41:57]
+truth <- data.mlr.select$PreFrailty#[41:57]
+cm_sohlen_rf <- confusionMatrix(pred, truth)
+cm_sohlen_rf
+```
+```{r}
+# precision = TP / (TP + FP)
+# recall = TP / (TP + FN)
+precision <- (7/21)#posPredValue(predictions = , y, positive="1")
+recall <- (7/29)#sensitivity(predictions, y, positive="1")
+
+F1 <- (2 * precision * recall) / (precision + recall)
+```
+
+
+##untuned random forest
+```{r}
+set.seed(1)
+library(ranger)
+# task <- TaskClassif$new(id="Predict.Patients.at.Fall.Risk", as_data_backend(data.exp.op), "PreFrailty", positive = "1", extra_args = list())
+learner = mlr_learners$get("classif.ranger")
+print(learner)
+task = task_ExOp
+task$feature_names
+learner <- lrn("classif.ranger", predict_type = "prob")
+train_set = sample(task$nrow, 0.7 * task$nrow)
+test_set = setdiff(seq_len(task$nrow), train_set)
+learner$train(task, row_ids = train_set)
+prediction = learner$predict(task, row_ids = test_set)
+prediction$score(msr("classif.auc"))
+
+resampling = rsmp("cv", folds = 3L)
+resampling$instantiate(task)
+rr = resample(task, learner, resampling)
+as.data.table(rr)[, list(resampling, iteration, prediction)]
+auc.rf.insole <- rr$aggregate((msr("classif.auc")))
+ce.rf.insole <- rr$aggregate(msr("classif.ce"))
+#View all predictions
+rr$prediction()$response
+rr$score(msr("classif.fbeta"))
+rf.plot <- autoplot(rr, type = "roc")+
+  ggtitle("ROC Curve Random Forest")
+ggplot2::autoplot(prediction, type = "roc")
+rf.plot3 <- rf.plot+
+  scale_y_continuous(expand = c(0.0005, 0.0005)) + 
+  theme_bw()+
+  theme(legend.position = "none",
+        legend.text = element_blank(),
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_line(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank()
+      )+
+  annotate("text", x = 0.7, y = 0.35, label = paste("Estimation of AUC:",round(auc.rf.insole,3)), fontface="bold",fontsize=30)+
+  annotate("text", x = 0.7, y = 0.30, label = paste("Classification Error:",round(ce.rf.insole,3)), fontface="bold", fontsize=30)+
+   annotate("text", x = 0.7, y = 0.25, label = paste("Estimation of Gini:",round(2*auc.rf.insole-1,3)), fontface="bold",fontsize=30)
+rf.plot3
+#ggsave("RandomForest_ExOp_Labs.pdf")
+   # annotate("text", x = 0.55, y = 0.1, label = paste("Features:",nrows(task$feature_names)), fontsize = 2)
+  #annotate("text", x = 0.5, y = 0.06, label = "Gait Cadence, Gait Speed")
+#ggsave("Untuned_random_Forest_gait.pdf")
+
+predrf = learner$train(task)$predict(task)
+test_table <- as.data.table(predrf)
+test_table[test_set]$response
+C = predrf$confusion
+print(C)
+
+
+
+```
+
+#IML
+```{r}
+library(iml)
+model = Predictor$new(learner, data = data.mlr.reduced, y = data.mlr.reduced$PreFrailty)
+effect = FeatureImp$new(model, loss = "ce")
+#effect = FeatureEffects$new(model)
+effect$plot()
+  # features = c("Number.of.steps",
+  # "Mean.length.width.of.gait.line..left...mm.",
+  # "Mean.length.width.of.gait.line..right...mm.",
+  # "Mean.stride.length..m.",
+  # "COP.trace.length..left...m.",
+  #  "Mean.acceleration..y..over.gait.cycle..right...g.")) 
+#features = c("bill_length","bill_depth", "flipper_length", "body_mass", "body_mass","year"))
+```
+#DALEX
+```{r}
+# install.packages("DALEX")
+# install.packages("DALEXtra")
+library("DALEX")
+library("DALEXtra")
+
+ranger_exp <- explain_mlr3(learner,
+        data     = data.mlr2,
+        y        = data.mlr2$PreFrailty,
+        label    ="classif.ranger",
+        colorize = FALSE)
+fifa_vi <- model_parts(ranger_exp)
+plot(fifa_vi, max_vars = 12, show_boxplots = FALSE)
+```
+
+
+```{r}
+library(caret)
+pred <- learner$train(task)$predict(task)$response[66:92]
+truth <- data.mlr.reduced$PreFrailty[66:92]
+cm_sohlen_rf <- confusionMatrix(pred, truth)
+cm_sohlen_rf
+```
+
+Autotune RF
+```{r}
+library(paradox)
+learner$param_set
+learner = lrn("classif.ranger", predict_type = "prob")
+learner$param_set$values$mtry = to_tune(p_int(1, 9))
+learner$param_set$values$max.depth = to_tune(p_int(1, 15))
+#learner$param_set$values$kernel = to_tune(c("polynomial", "radial"))
+learner$param_set$values$num.trees = to_tune(p_int(150, 1000))
+
+rr = tune_nested(
+  method = "grid_search",
+  task = task_rfe_randomforest,
+  learner = learner, 
+  inner_resampling = rsmp ("cv", folds = 3),
+  outer_resampling = rsmp("cv", folds = 3), 
+  measure = msr("classif.ce"),
+  resolution = 5
+)
+
+cf.rft.insole <- rr$aggregate(msr("classif.ce"))
+auc.rft.insole <- rr$aggregate(msr("classif.auc"))
+f1.rft.insole <- rr$aggregate(msr("classif.fbeta"))
+tuned_rf <- autoplot(rr, type = "roc")+
+  ggtitle("ROC Curve Random Forest Tuned")
+
+rf.plot_tuned_labs <- tuned_rf+
+  scale_y_continuous(expand = c(0.0005, 0.0005)) + 
+  theme_bw()+
+  theme(legend.position = "none",
+        legend.text = element_blank(),
+        axis.text = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10), 
+        axis.title = element_text(face = "bold", 
+                                 color = "black", 
+                                 size = 10),
+        panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+        #axis.text.x=element_text(margin = margin(t = 10)),
+      axis.line = element_blank(),
+      axis.ticks = element_line(size = 0.3),
+         panel.border = element_rect(colour = "black", fill=NA, size=.5),
+        #axis.text.x=element_text(margin = margin(t = 20)),
+          plot.title = element_text(size = 14, face = "bold", color = "black", hjust = 0),
+        axis.text.x = element_text(angle = 0, vjust = 0, hjust=0.5),
+        strip.background = element_blank(),
+  strip.text.x = element_blank(),
+      )+
+  annotate("text", x = 0.7, y = 0.35, label = paste("Estimation of AUC:",round(auc.rft.insole,3)), fontface="bold",fontsize=30)+
+  annotate("text", x = 0.7, y = 0.30, label = paste("Classification Error:",round(cf.rft.insole,3)), fontface="bold", fontsize=30)+
+  annotate("text", x = 0.7, y = 0.25, label = paste("Estimation of Gini:",round(2*auc.rft.insole-1,3)), fontface="bold",fontsize=30)
+
+rf.plot_tuned_labs
+#ggsave("RF_exopFS_tuned_V4.pdf", width = 5, height = 5)
+```
+
+##Real evaluation of SARC-F and RF
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
